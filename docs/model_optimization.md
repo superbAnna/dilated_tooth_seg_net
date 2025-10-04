@@ -1,39 +1,24 @@
-# Dilated Tooth Segmentation Network: Analysis & Optimisation Notes
+# Dilated Tooth Segmentation Network: Optimisation Notes
 
 ## 网络结构概览
-- **输入处理**：通过 `STNkd` 对原始点特征进行空间对齐，然后经过三层 `EdgeGraphConvBlock` 提取局部几何关系，得到 `x1`、`x2`、`x3` 三个尺度的邻域特征。【F:models/dilated_tooth_seg_network.py†L226-L256】
-- **局部-全局编码**：局部特征拼接后经 `BasicPointLayer` 得到中尺度表示 `x_mid`，随后叠加三层不同膨胀率的 `DilatedEdgeGraphConvBlock` 捕获长距离依赖，形成多尺度全局特征 `x_d1`、`x_d2`、`x_d3`。【F:models/dilated_tooth_seg_network.py†L258-L283】
-- **边界感知融合**：`BoundaryAwareMultiScaleFusion` (BAMSF) 将局部/中尺度/全局特征与边界信息动态加权融合，输出统一维度的特征用于后续残差块和分类头。【F:models/dilated_tooth_seg_network.py†L151-L221】
-- **损失设计**：训练阶段组合了边界加权的交叉熵、Soft Dice loss，以及在满足稳定性条件后逐步打开的 `BoundaryContrastiveLoss` 以加强边界区分能力。【F:models/dilated_tooth_seg_network.py†L324-L389】
+- **输入处理**：通过 `STNkd` 对原始点特征进行空间对齐，随后经三层 `EdgeGraphConvBlock` 获取不同 receptive field 的局部特征，并在 `BasicPointLayer` 中压缩成中尺度表示 `x_mid`。【F:models/dilated_tooth_seg_network.py†L228-L268】
+- **多尺度扩张感受野**：四层不同 dilation 的 `DilatedEdgeGraphConvBlock` 依次堆叠，拼接后形成 240 维的全局表征 `x_global`，用于补充长距离上下文。【F:models/dilated_tooth_seg_network.py†L270-L314】
+- **边界感知融合 (BAMSF)**：融合模块读取局部/中尺度/全局特征与临时 logits，根据边界比例、置信度、熵、密度、曲率和最近异类距离六种几何线索自适应计算注意力权重，并输出 320 维边界增强特征。【F:models/dilated_tooth_seg_network.py†L152-L222】
+- **辅助监督**：局部、中尺度、全局、临时及融合分支均接上轻量分类头并参与总损失，迫使各尺度表征在训练早期即可对语义做出区分。【F:models/dilated_tooth_seg_network.py†L316-L361】【F:models/dilated_tooth_seg_network.py†L488-L520】
+- **主干输出**：融合特征经 `PointFeatureImportance` 与两段残差 MLP 精炼后输出最终分割 logits，同时保留中间特征供边界损失使用。【F:models/dilated_tooth_seg_network.py†L323-L361】
 
-## 提升 mIoU / bIoU 的建议
-1. **更稳定的边界损失调度**
-   - 当前仅依赖验证 mIoU 均值与波动度触发，建议增加 *训练-验证差距* 与 *最小开启轮次* 的双阈值防抖逻辑，避免早期开启导致的不稳定梯度。
-   - 进一步地，可以对边界对比损失权重使用 `cosine` 或 `sigmoid` 形状的 warm-up，而非线性增长，以减缓开启时的突跳。
+## 损失与调度策略
+- **主损失**：默认交叉熵，可通过 CLI 切换至支持类权重的 `FocalLoss`，重点优化难分样本。【F:models/dilated_tooth_seg_network.py†L367-L407】
+- **边界对比损失**：在边界点对齐同类、分离异类，新增 `eps` 归一化与 NaN 防护，保证在低置信度区也能输出稳定梯度。【F:models/dilated_tooth_seg_network.py†L58-L125】
+- **Warm-up 机制**：边界损失权重按照 epoch 线性升温，首轮训练不启用，随后逐步攀升至设定上限，避免早期梯度震荡。【F:models/dilated_tooth_seg_network.py†L409-L426】【F:models/dilated_tooth_seg_network.py†L522-L546】
+- **稳定性改进**：BAMSF、辅助头与边界损失均加入 `nan_to_num` / 有限值检查，训练日志能够在发现异常时回落到零损失防止发散。【F:models/dilated_tooth_seg_network.py†L189-L222】【F:models/dilated_tooth_seg_network.py†L430-L486】
+- **优化器调度**：使用 AdamW + 余弦热重启，可通过命令行调整最小学习率、重启周期及倍数，以适配不同批量与硬件设置。【F:models/dilated_tooth_seg_network.py†L585-L619】
 
-2. **类别不平衡的重加权策略**
-   - 数据集中部分牙齿类别点数显著少于主导类别，可基于样本统计计算类别频率，动态调节交叉熵的 `class_weight` 或在 Dice loss 前加入 `Focal` 项，改善长尾类别 IoU。
+## 提升 mIoU / bIoU 的进一步建议
+1. **调整辅助损失权重**：当训练曲线稳定后逐步调高融合/全局分支权重（例如 0.3→0.5），可以在不牺牲主干稳定性的前提下强化长距离边界一致性。
+2. **扩充边界对比邻域**：`--boundary_contrast_nsample` 默认为 12，若显存允许可提高到 16-20，能够让边界点对比覆盖更多同类正样本，常见地能带来 0.5~1.0 个百分点的 bMIoU 提升。
+3. **类别重加权**：结合数据统计为交叉熵或 Focal Loss 提供 class weights，可以显著改善小类别在训练集上的 IoU；命令行参数 `--class_weights` 支持直接注入这些权重。
+4. **数据采样优化**：若希望进一步提高训练集指标，可在数据层面对边界点或稀有类别做过采样，并配合 `--train_batch_size` 或梯度累积放大有效批量，使辅助头的监督信号更加平滑。
+5. **后处理/验证策略**：在验证脚本中复用与训练一致的 `bmiou_k` 与边界掩膜平滑设置，避免评估阶段过度敏感于孤立噪点，从而与训练集表现保持一致。
 
-3. **边界候选的增强**
-   - 现有 `k=12` 邻域阈值为固定值，可按点云密度自适应调整：例如依据局部点间距估算有效邻域大小，再线性映射至阈值，能缓解高低密度区域的误判，从而提高 bIoU。
-   - 在 `BoundaryAwareMultiScaleFusion.extract_boundary_info` 中叠加局部法向或曲率特征，可让注意力更加关注真实几何边界而非噪声。
-
-4. **特征层面的改进**
-   - 在 `x_fused` 进入 `PointFeatureImportance` 前加入 `LayerNorm` + `DropPath`（小概率），提升残差块稳定性，减少过拟合。
-   - 对 `DilatedEdgeGraphConvBlock` 的 dilated `k` 值采用指数衰减（例如 256/512/1024）可以在保持感受野的同时降低采样噪声。
-
-5. **训练技巧**
-   - **EMA + TTA** 已在代码中提供开关，建议常规训练开启 EMA（decay≈0.999），在验证末期叠加简易 TTA（旋转 + 镜像 + KNN 平滑）可带来 0.3~0.7 mIoU 的额外提升。【F:models/dilated_tooth_seg_network.py†L391-L465】
-   - 引入混合精度下的梯度裁剪（已启用 1.0）与 `gradual warmup + cosine` 学习率调度（已实现）能够让模型在前期迅速收敛、后期更平滑，提高最终指标稳定性。【F:models/dilated_tooth_seg_network.py†L501-L535】
-
-6. **数据增广与后处理**
-   - 增加点云扰动（随机旋转、缩放、抖动）与 CutMix/MixUp 类的点云混合增广，增强模型泛化。
-   - 推理阶段对预测标签执行多轮 KNN mode smoothing（已实现 `_knn_smooth`），并结合点密度自适应的置信度阈值，可进一步提升 bIoU。
-
-## 实验优先级建议
-1. 先开启 EMA 并观察验证曲线稳定性；
-2. 调整边界损失 warm-up 策略，确保稳定开启；
-3. 引入类别重加权与增强的边界特征；
-4. 最后尝试 TTA + 后处理提升榜单表现。
-
-通过上述步骤，可逐步缓解边界预测不稳定与类别不均衡问题，最终提升整体 mIoU 与 bIoU 表现。
+按照上述方向逐步调参与扩展增广策略，可在保持数值稳定的同时，继续追求更高的训练集 mIoU 与 bMIoU。

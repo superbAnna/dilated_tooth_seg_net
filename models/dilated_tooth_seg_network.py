@@ -81,7 +81,7 @@ class BoundaryContrastiveLoss(nn.Module):
         )
 
         if not boundary_mask.any():
-            return torch.tensor(0.0, device=features.device, requires_grad=True)
+            return features.new_zeros((), requires_grad=True)
 
         # 获取边界点
         boundary_indices = torch.where(boundary_mask)[0]
@@ -121,7 +121,7 @@ class BoundaryContrastiveLoss(nn.Module):
         """向量化计算对比损失"""
         M = boundary_features.shape[0]
         if M < 2:
-            return torch.tensor(0.0, device=boundary_features.device, requires_grad=True)
+            return boundary_features.new_zeros((), requires_grad=True)
 
         # 准备单批次 offset
         offset_single = torch.tensor([0, M], dtype=torch.int32, device=boundary_positions.device)
@@ -132,8 +132,8 @@ class BoundaryContrastiveLoss(nn.Module):
             offset_single, offset_single
         )
 
-        # 特征归一化
-        boundary_features = F.normalize(boundary_features, dim=-1)
+        # 特征归一化并避免零向量导致的 NaN
+        boundary_features = F.normalize(boundary_features, dim=-1, eps=1e-6)
 
         # 向量化计算相似度
         anchor_features = boundary_features.unsqueeze(1)  # [M, 1, C]
@@ -153,7 +153,7 @@ class BoundaryContrastiveLoss(nn.Module):
         valid_mask = has_pos & has_neg
 
         if not valid_mask.any():
-            return torch.tensor(0.0, device=boundary_features.device, requires_grad=True)
+            return boundary_features.new_zeros((), requires_grad=True)
 
         # 只计算有效点的损失
         sim_matrix = sim_matrix[valid_mask]  # [V, K]
@@ -165,7 +165,15 @@ class BoundaryContrastiveLoss(nn.Module):
         all_exp = exp_sim.sum(dim=1)
 
         loss = -torch.log(pos_exp / all_exp + 1e-8)
-        return loss.mean()
+        loss = loss.mean()
+        if torch.isnan(loss) or torch.isinf(loss):
+            return torch.zeros(
+                (),
+                device=boundary_features.device,
+                dtype=boundary_features.dtype,
+                requires_grad=True,
+            )
+        return loss
 
 
 # Bmiou
@@ -331,10 +339,12 @@ class BoundaryAwareMultiScaleFusion(nn.Module):
         curvature = curvature.reshape(B, N)
         boundary_distance = boundary_distance.reshape(B, N)
 
-        return torch.stack(
+        boundary_info = torch.stack(
             [boundary_score, confidence, entropy, density, curvature, boundary_distance],
             dim=-1,
         )
+        boundary_info = torch.nan_to_num(boundary_info, nan=0.0, posinf=0.0, neginf=0.0)
+        return boundary_info
 
     def forward(self, feats, logits, labels, pos):
         B, N = pos.shape[:2]
@@ -355,9 +365,11 @@ class BoundaryAwareMultiScaleFusion(nn.Module):
         global_feat = feats_stack.mean(dim=2)
         attn_input = torch.cat([global_feat, boundary_encoding], dim=-1)
         attn_weights = F.softmax(self.attention(attn_input), dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
 
         fused_feat = (feats_stack * attn_weights.unsqueeze(-1)).sum(dim=2)
         output = self.output_proj(fused_feat) + global_feat
+        output = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
 
         return output, attn_weights
 
@@ -492,14 +504,17 @@ class DilatedToothSegmentationNetwork(nn.Module):
 
         feats = [x_local, x_mid, x_global]
         x_fused, attn_weights = self.bamsf(feats, logits_temp, labels, pos)
+        x_fused = torch.nan_to_num(x_fused, nan=0.0, posinf=0.0, neginf=0.0)
         logits_fused = self.fused_aux_head(x_fused)
         x_fused = self.dropout2(x_fused)
 
         x = self.feature_importance(x_fused)
         x = self.res_block1(x)
         features = self.res_block2(x)
+        features = torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
         features = self.dropout3(features)
         seg_pred = self.out(features)
+        seg_pred = torch.nan_to_num(seg_pred, nan=0.0, posinf=0.0, neginf=0.0)
 
         aux_logits = {
             "local": aux_logits_local,
@@ -605,12 +620,13 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         })
 
     def _current_boundary_weight(self) -> float:
-        progress = min(1.0, (self.current_epoch + 1) / self.boundary_warmup_epochs)
+        progress = min(1.0, max(0.0, self.current_epoch / self.boundary_warmup_epochs))
         return self.boundary_contrast_weight_max * progress
 
     def _compute_aux_losses(self, aux_logits, targets):
         aux_losses = {}
-        total = 0.0
+        first_tensor = next(iter(aux_logits.values()))
+        total = torch.zeros((), device=targets.device, dtype=first_tensor.dtype)
         for name, weight in self.aux_weights.items():
             if weight <= 0:
                 continue
@@ -631,10 +647,16 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
 
         seg_loss = self.seg_loss(seg_pred, y)
 
-        boundary_loss1 = self.boundary_contrast_loss(x_fused, pos, y)
-        boundary_loss2 = self.boundary_contrast_loss(features, pos, y)
-        boundary_loss = 0.5 * (boundary_loss1 + boundary_loss2)
-        boundary_term = self.boundary_weight * boundary_loss
+        boundary_loss = seg_loss.new_zeros(())
+        boundary_term = seg_loss.new_zeros(())
+        if self.boundary_loss_enabled:
+            boundary_loss1 = self.boundary_contrast_loss(x_fused, pos, y)
+            boundary_loss2 = self.boundary_contrast_loss(features, pos, y)
+            boundary_loss = 0.5 * (boundary_loss1 + boundary_loss2)
+            if torch.isfinite(boundary_loss):
+                boundary_term = self.boundary_weight * boundary_loss
+            else:
+                boundary_loss = seg_loss.new_zeros(())
 
         aux_total_loss, aux_losses = self._compute_aux_losses(aux_logits, y)
 
@@ -673,6 +695,8 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         boundary_loss1 = self.boundary_contrast_loss(x_fused, pos, y)
         boundary_loss2 = self.boundary_contrast_loss(features, pos, y)
         boundary_loss = 0.5 * (boundary_loss1 + boundary_loss2)
+        if not torch.isfinite(boundary_loss):
+            boundary_loss = seg_loss.new_zeros(())
         aux_total_loss, aux_losses = self._compute_aux_losses(aux_logits, y)
         total_loss = seg_loss + self.boundary_weight * boundary_loss + aux_total_loss
 
@@ -714,6 +738,8 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         boundary_loss1 = self.boundary_contrast_loss(x_fused, pos, y)
         boundary_loss2 = self.boundary_contrast_loss(features, pos, y)
         boundary_loss = 0.5 * (boundary_loss1 + boundary_loss2)
+        if not torch.isfinite(boundary_loss):
+            boundary_loss = seg_loss.new_zeros(())
         aux_total_loss, aux_losses = self._compute_aux_losses(aux_logits, y)
         total_loss = seg_loss + self.boundary_contrast_weight_max * boundary_loss + aux_total_loss
 
