@@ -560,6 +560,7 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         self.log("train_loss", total_loss, prog_bar=True, on_epoch=True, sync_dist=True)
         self.log("train_seg_ce", ce, on_epoch=True, sync_dist=True)
         self.log("train_seg_dice", dice, on_epoch=True, sync_dist=True)
+        self.log("train_seg_loss", seg_loss, on_epoch=True, sync_dist=True)
         self.log("train_boundary_loss", boundary_loss, on_epoch=True, sync_dist=True)
         self.log("train_boundary_weight", bc_weight, on_epoch=True, sync_dist=True)
         self.log("boundary_loss_active", float(self.boundary_loss_enabled), on_epoch=True, sync_dist=True)

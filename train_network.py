@@ -45,6 +45,7 @@ def get_dataset(train_test_split=1) -> Dataset:
 
 class MetricsCalculator(pl.Callback):
     """自定义回调函数输出每个epoch的相关指标"""
+
     def __init__(self):
         super().__init__()
         self.best_miou = float('-inf')
@@ -53,7 +54,27 @@ class MetricsCalculator(pl.Callback):
         self.best_miou_epoch = -1
         self.best_bmiou_epoch = -1
         self.best_combined_epoch = -1
-    
+
+    @staticmethod
+    def _to_float(value, default: float = 0.0) -> float:
+        """Lightning 会返回 Tensor 或 Python 数值，这里统一为 float"""
+        if value is None:
+            return default
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                return default
+            return value.detach().float().item()
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_metric(self, metrics, *names, default: float = 0.0) -> float:
+        for name in names:
+            if name in metrics:
+                return self._to_float(metrics[name], default)
+        return default
+
     def setup(self, trainer, pl_module, stage):
         """Lightning生命周期方法，在fit/test开始时调用"""
         # 这里初始化，保证在分布式环境中正确
@@ -64,20 +85,20 @@ class MetricsCalculator(pl.Callback):
         self.best_bmiou_epoch = -1
         self.best_combined_epoch = -1
         self.best_epoch = -1
-        
+
 
     def on_train_epoch_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
             return
-        metrics = trainer.logged_metrics
-        
+        metrics = trainer.callback_metrics
+
         # 主模型训练指标
-        train_acc = metrics.get('train_acc', 0.0)
-        train_miou = metrics.get('train_miou', 0.0)
-        train_bmiou = metrics.get('train_bmiou', 0.0)
-        train_boundary_loss = metrics.get('train_boundary_loss', 0.0)
-        train_seg_loss = metrics.get('train_seg_loss', 0.0)
-        train_loss = metrics.get('train_loss', 0.0)
+        train_acc = self._get_metric(metrics, 'train_acc', 'train_acc_epoch')
+        train_miou = self._get_metric(metrics, 'train_miou', 'train_miou_epoch')
+        train_bmiou = self._get_metric(metrics, 'train_bmiou', 'train_bmiou_epoch')
+        train_boundary_loss = self._get_metric(metrics, 'train_boundary_loss', 'train_boundary_loss_epoch')
+        train_seg_loss = self._get_metric(metrics, 'train_seg_loss', 'train_seg_loss_epoch')
+        train_loss = self._get_metric(metrics, 'train_loss', 'train_loss_epoch')
         cbl_status = pl_module.boundary_loss_enabled
         cbl_indicator = "✓ ENABLED" if cbl_status else "✗ DISABLED"
         # 输出主模型训练指标
@@ -99,22 +120,18 @@ class MetricsCalculator(pl.Callback):
         if trainer.sanity_checking:
             return
         
-        metrics = trainer.logged_metrics
+        metrics = trainer.callback_metrics
         current_epoch = trainer.current_epoch + 1
-        
+
         # 获取验证指标
-        val_acc = metrics.get('val_acc', 0.0)
-        val_miou = float(metrics.get('val_miou', 0.0))
-        val_bmiou = float(metrics.get('val_bmiou', 0.0))
-        val_loss = metrics.get('val_loss', 0.0)
+        val_acc = self._get_metric(metrics, 'val_acc', 'val_acc_epoch')
+        val_miou = self._get_metric(metrics, 'val_miou', 'val_miou_epoch')
+        val_bmiou = self._get_metric(metrics, 'val_bmiou', 'val_bmiou_epoch')
+        val_loss = self._get_metric(metrics, 'val_loss', 'val_loss_epoch')
         
         # 计算组合指标（可以调整权重）
         val_combined = val_miou + val_bmiou
-        
-        
-        # 检查并保存3个最佳模型
-        saved_models = []
-        
+
         # 更新最佳记录（仅用于显示）
         if val_miou > self.best_miou:
             self.best_miou = val_miou
