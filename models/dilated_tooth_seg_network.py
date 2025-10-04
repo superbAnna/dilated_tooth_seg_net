@@ -664,6 +664,7 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
 
         self.train_acc(seg_pred, y)
         self.train_miou(seg_pred, y)
+        # 计算BMIoU
         pred_labels = torch.argmax(seg_pred, dim=1)
         bmiou = BoundaryMIoU.compute_boundary_miou(pred_labels, y, pos, k=self.bmiou_k)
 
@@ -742,8 +743,11 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         aux_total_loss, aux_losses = self._compute_aux_losses(aux_logits, y)
         total_loss = seg_loss + self.boundary_contrast_weight_max * boundary_loss + aux_total_loss
 
+        # 主模型指标
         self.test_acc(seg_pred, y)
         self.test_miou(seg_pred, y)
+
+        # 主模型BMIoU
         pred_labels = torch.argmax(seg_pred, dim=1)
         bmiou = BoundaryMIoU.compute_boundary_miou(pred_labels, y, pos, k=self.bmiou_k)
 
@@ -765,6 +769,7 @@ class LitDilatedToothSegmentationNetwork(L.LightningModule):
         self.train_miou.reset()
 
     def on_validation_epoch_start(self):
+        """验证epoch开始时重置指标"""
         self.val_acc.reset()
         self.val_miou.reset()
 
