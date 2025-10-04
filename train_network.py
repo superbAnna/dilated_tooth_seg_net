@@ -99,8 +99,13 @@ class MetricsCalculator(pl.Callback):
         train_boundary_loss = self._get_metric(metrics, 'train_boundary_loss', 'train_boundary_loss_epoch')
         train_seg_loss = self._get_metric(metrics, 'train_seg_loss', 'train_seg_loss_epoch')
         train_loss = self._get_metric(metrics, 'train_loss', 'train_loss_epoch')
-        cbl_status = pl_module.boundary_loss_enabled
-        cbl_indicator = "✓ ENABLED" if cbl_status else "✗ DISABLED"
+        train_boundary_weight = self._get_metric(metrics, 'train_boundary_weight', 'train_boundary_weight_epoch')
+        train_aux_total = self._get_metric(metrics, 'train_aux_total', 'train_aux_total_epoch')
+        train_aux_local = self._get_metric(metrics, 'train_aux_local', 'train_aux_local_epoch')
+        train_aux_mid = self._get_metric(metrics, 'train_aux_mid', 'train_aux_mid_epoch')
+        train_aux_global = self._get_metric(metrics, 'train_aux_global', 'train_aux_global_epoch')
+        train_aux_temp = self._get_metric(metrics, 'train_aux_temp', 'train_aux_temp_epoch')
+        train_aux_fused = self._get_metric(metrics, 'train_aux_fused', 'train_aux_fused_epoch')
         # 输出主模型训练指标
         print(f"\n=== Epoch {trainer.current_epoch + 1} Training Metrics ===")
         print(f"[Main Model]")
@@ -108,8 +113,13 @@ class MetricsCalculator(pl.Callback):
         print(f"  Train mIoU: {train_miou:.4f}")
         print(f"  Train Boundary mIoU: {train_bmiou:.4f}")
         print(f"  Train Seg Loss: {train_seg_loss:.4f}")
-        print(f"  Train Boundary Loss: {train_boundary_loss:.4f}({cbl_indicator})")
+        print(f"  Train Boundary Loss: {train_boundary_loss:.4f}")
+        print(f"  Boundary Weight (active): {train_boundary_weight:.4f}")
         print(f"  Train Total Loss: {train_loss:.4f}")
+        print(f"[Auxiliary Heads]")
+        print(f"  Total Aux Loss: {train_aux_total:.4f}")
+        print(f"    Local: {train_aux_local:.4f} | Mid: {train_aux_mid:.4f} | Global: {train_aux_global:.4f}")
+        print(f"    Temp: {train_aux_temp:.4f} | Fused: {train_aux_fused:.4f}")
         
     def on_validation_epoch_end(self, trainer, pl_module):
         """验证epoch结束时的回调"""
@@ -128,7 +138,13 @@ class MetricsCalculator(pl.Callback):
         val_miou = self._get_metric(metrics, 'val_miou', 'val_miou_epoch')
         val_bmiou = self._get_metric(metrics, 'val_bmiou', 'val_bmiou_epoch')
         val_loss = self._get_metric(metrics, 'val_loss', 'val_loss_epoch')
-        
+        val_aux_total = self._get_metric(metrics, 'val_aux_total', 'val_aux_total_epoch')
+        val_aux_local = self._get_metric(metrics, 'val_aux_local', 'val_aux_local_epoch')
+        val_aux_mid = self._get_metric(metrics, 'val_aux_mid', 'val_aux_mid_epoch')
+        val_aux_global = self._get_metric(metrics, 'val_aux_global', 'val_aux_global_epoch')
+        val_aux_temp = self._get_metric(metrics, 'val_aux_temp', 'val_aux_temp_epoch')
+        val_aux_fused = self._get_metric(metrics, 'val_aux_fused', 'val_aux_fused_epoch')
+
         # 计算组合指标（可以调整权重）
         val_combined = val_miou + val_bmiou
 
@@ -144,8 +160,6 @@ class MetricsCalculator(pl.Callback):
         if val_combined > self.best_combined:
             self.best_combined = val_combined
             self.best_combined_epoch = current_epoch
-        cbl_status = pl_module.boundary_loss_enabled
-        cbl_indicator = "✓ ENABLED" if cbl_status else "✗ DISABLED"
         # 输出验证指标
         print(f"\n=== Epoch {current_epoch} Validation Metrics ===")
         print(f"[Main Model]")
@@ -154,8 +168,10 @@ class MetricsCalculator(pl.Callback):
         print(f"  Val Boundary mIoU: {val_bmiou:.4f} (best: {self.best_bmiou:.4f} @ epoch {self.best_bmiou_epoch})")
         print(f"  Val Combined: {val_combined:.4f} (best: {self.best_combined:.4f} @ epoch {self.best_combined_epoch})")
         print(f"  Val Loss: {val_loss:.4f}")
-        print(f"\n[Training Strategy]")
-        print(f"  Boundary Contrastive Loss: {cbl_indicator}")
+        print(f"[Auxiliary Heads]")
+        print(f"  Total Aux Loss: {val_aux_total:.4f}")
+        print(f"    Local: {val_aux_local:.4f} | Mid: {val_aux_mid:.4f} | Global: {val_aux_global:.4f}")
+        print(f"    Temp: {val_aux_temp:.4f} | Fused: {val_aux_fused:.4f}")
         print("=" * 50)
         
     
@@ -179,29 +195,71 @@ if __name__ == "__main__":
                         help='Train test split option. Either 1 or 2', default=2)
     parser.add_argument('--ckpt', type=str,help='Checkpoint path')
     parser.add_argument('--boundary_contrast_weight', type=float,
-                        help='Weight for cbl for boundary loss', default=0.8)
-    parser.add_argument('--enable_boundary_loss_threshold', type=float,
-                        help='Val mIoU threshold to enable boundary loss', default=0.60)
-    parser.add_argument('--stability_window', type=int,
-                        help='Number of epochs for stability check', default=3)
-    parser.add_argument('--stability_tolerance', type=float,
-                        help='Max std dev for stability', default=0.02)
-    parser.add_argument('--max_train_val_gap', type=float,
-                        help='Max train-val gap to enable boundary loss', default=0.35)
+                        help='Max weight for boundary contrastive loss', default=1.2)
+    parser.add_argument('--boundary_warmup_epochs', type=int,
+                        help='Warmup epochs to ramp boundary loss weight', default=10)
+    parser.add_argument('--boundary_contrast_nsample', type=int,
+                        help='Neighbor count used in boundary contrastive loss', default=12)
+    parser.add_argument('--boundary_contrast_temperature', type=float,
+                        help='Temperature for boundary contrastive loss', default=0.07)
+    parser.add_argument('--bmiou_k', type=int,
+                        help='Neighbor size for boundary mIoU computation', default=12)
+    parser.add_argument('--aux_local_weight', type=float, default=0.2,
+                        help='Weight for local auxiliary supervision')
+    parser.add_argument('--aux_mid_weight', type=float, default=0.2,
+                        help='Weight for mid-level auxiliary supervision')
+    parser.add_argument('--aux_global_weight', type=float, default=0.25,
+                        help='Weight for global auxiliary supervision')
+    parser.add_argument('--aux_temp_weight', type=float, default=0.15,
+                        help='Weight for temp classifier supervision')
+    parser.add_argument('--aux_fused_weight', type=float, default=0.3,
+                        help='Weight for fused feature auxiliary supervision')
+    parser.add_argument('--class_weights', type=str,
+                        help='Comma separated class weights for loss balancing')
+    parser.add_argument('--use_focal_loss', action='store_true',
+                        help='Enable focal loss for primary supervision')
+    parser.add_argument('--focal_gamma', type=float, default=1.5,
+                        help='Gamma value for focal loss')
+    parser.add_argument('--lr_min', type=float, default=1e-5,
+                        help='Minimum learning rate for cosine restarts')
+    parser.add_argument('--lr_restart_interval', type=int, default=50,
+                        help='Epoch interval for cosine annealing warm restarts')
+    parser.add_argument('--lr_restart_mult', type=int, default=2,
+                        help='Multiplier for cosine restart interval')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Weight decay for optimizer')
 
     args = parser.parse_args()
 
     print(f'Run Experiment using args: {args}')
 
+    class_weights = None
+    if args.class_weights:
+        try:
+            class_weights = [float(w) for w in args.class_weights.split(',') if w.strip()]
+        except ValueError as exc:
+            raise ValueError('Failed to parse --class_weights, please provide comma separated floats') from exc
 
     test_dataset,train_dataset = get_dataset(args.train_test_split)
 
     model = LitDilatedToothSegmentationNetwork(
         boundary_contrast_weight=args.boundary_contrast_weight,
-        enable_boundary_loss_threshold=args.enable_boundary_loss_threshold,
-        stability_window=args.stability_window,
-        stability_tolerance=args.stability_tolerance,
-        max_train_val_gap=args.max_train_val_gap
+        boundary_warmup_epochs=args.boundary_warmup_epochs,
+        aux_local_weight=args.aux_local_weight,
+        aux_mid_weight=args.aux_mid_weight,
+        aux_global_weight=args.aux_global_weight,
+        aux_temp_weight=args.aux_temp_weight,
+        aux_fused_weight=args.aux_fused_weight,
+        class_weights=class_weights,
+        use_focal_loss=args.use_focal_loss,
+        focal_gamma=args.focal_gamma,
+        boundary_contrast_nsample=args.boundary_contrast_nsample,
+        boundary_contrast_temperature=args.boundary_contrast_temperature,
+        bmiou_k=args.bmiou_k,
+        lr_min=args.lr_min,
+        lr_restart_interval=args.lr_restart_interval,
+        lr_restart_mult=args.lr_restart_mult,
+        weight_decay=args.weight_decay,
     )
     
     val_dataloader = torch.utils.data.DataLoader(
