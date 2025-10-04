@@ -179,19 +179,15 @@ if __name__ == "__main__":
                         help='Train test split option. Either 1 or 2', default=2)
     parser.add_argument('--ckpt', type=str,help='Checkpoint path')
     parser.add_argument('--boundary_contrast_weight', type=float,
-                        help='Weight for cbl for boundary loss', default=0.3)
+                        help='Weight for cbl for boundary loss', default=0.8)
     parser.add_argument('--enable_boundary_loss_threshold', type=float,
-                        help='Val mIoU threshold to enable boundary loss', default=0.70)
+                        help='Val mIoU threshold to enable boundary loss', default=0.60)
     parser.add_argument('--stability_window', type=int,
                         help='Number of epochs for stability check', default=3)
     parser.add_argument('--stability_tolerance', type=float,
                         help='Max std dev for stability', default=0.02)
     parser.add_argument('--max_train_val_gap', type=float,
-                        help='Max train-val gap to enable boundary loss', default=0.20)
-    parser.add_argument('--use_ema', action='store_true', default=True, help='Enable EMA for validation/test')
-    parser.add_argument('--ema_decay', type=float, default=0.999)
-    parser.add_argument('--use_tta', action='store_true', default=False, help='Use TTA on validation')
-    #EMA 通常直接带来 0.5–2pt 的 val mIoU 提升；TTA + 邻域平滑对 bMIoU 尤其有效。可以先只开 EMA，稳定后再试 TTA。
+                        help='Max train-val gap to enable boundary loss', default=0.35)
 
     args = parser.parse_args()
 
@@ -201,14 +197,11 @@ if __name__ == "__main__":
     test_dataset,train_dataset = get_dataset(args.train_test_split)
 
     model = LitDilatedToothSegmentationNetwork(
-    boundary_contrast_weight=args.boundary_contrast_weight,
-    enable_boundary_loss_threshold=args.enable_boundary_loss_threshold,
-    stability_window=args.stability_window,
-    stability_tolerance=args.stability_tolerance,
-    max_train_val_gap=args.max_train_val_gap,
-    use_ema=args.use_ema,
-    ema_decay=args.ema_decay,
-    use_tta=args.use_tta
+        boundary_contrast_weight=args.boundary_contrast_weight,
+        enable_boundary_loss_threshold=args.enable_boundary_loss_threshold,
+        stability_window=args.stability_window,
+        stability_tolerance=args.stability_tolerance,
+        max_train_val_gap=args.max_train_val_gap
     )
     
     val_dataloader = torch.utils.data.DataLoader(
@@ -269,7 +262,7 @@ if __name__ == "__main__":
         logger=logger,
         precision=args.n_bit_precision,
         deterministic=False,
-        callbacks=[metrics_callback],     # 如需 EMA callback 也可独立封装
+        callbacks=[metrics_callback],
         gradient_clip_val=1.0,            # ← 防爆梯度，验证更稳
         strategy=DDPStrategy(
             find_unused_parameters=False,
